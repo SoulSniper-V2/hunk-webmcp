@@ -1,0 +1,66 @@
+{
+  "owner": "openai",
+  "repo": "codex",
+  "number": 31922,
+  "title": "core: add tool-free thread mode",
+  "html_url": "https://github.com/openai/codex/pull/31922",
+  "user": "river-oai",
+  "state": "open",
+  "draft": true,
+  "head": "river/thread-title-no-tools",
+  "base": "main",
+  "additions": 50,
+  "deletions": 2,
+  "changed_files": 7,
+  "files": [
+    {
+      "filename": "codex-rs/app-server/src/mcp_refresh.rs",
+      "status": "modified",
+      "additions": 7,
+      "deletions": 0,
+      "patch": "@@ -1,6 +1,7 @@\n use crate::config_manager::ConfigManager;\n use codex_core::CodexThread;\n use codex_core::ThreadManager;\n+use codex_features::Feature;\n use codex_protocol::ThreadId;\n use codex_protocol::protocol::McpServerRefreshConfig;\n use codex_protocol::protocol::Op;\n@@ -21,6 +22,9 @@ pub(crate) async fn queue_strict_refresh(\n             .get_thread(thread_id)\n             .await\n             .map_err(|err| io::Error::other(format!(\"failed to load thread {thread_id}: {err}\")))?;\n+        if thread.enabled(Feature::ToolFree) {\n+            continue;\n+        }\n         let config = build_refresh_config(thread.as_ref(), config_manager).await?;\n         refreshes.push((thread_id, thread, config));\n     }\n@@ -42,6 +46,9 @@ pub(crate) async fn queue_best_effort_refresh(\n                 continue;\n             }\n         };\n+        if thread.enabled(Feature::ToolFree) {\n+            continue;\n+        }\n         let config = match build_refresh_config(thread.as_ref(), config_manager).await {\n             Ok(config) => config,\n             Err(err) => {"
+    },
+    {
+      "filename": "codex-rs/core/config.schema.json",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 0,
+      "patch": "@@ -674,6 +674,9 @@\n             \"tool_call_mcp_elicitation\": {\n               \"type\": \"boolean\"\n             },\n+            \"tool_free\": {\n+              \"type\": \"boolean\"\n+            },\n             \"tool_search\": {\n               \"type\": \"boolean\"\n             },\n@@ -5046,6 +5049,9 @@\n         \"tool_call_mcp_elicitation\": {\n           \"type\": \"boolean\"\n         },\n+        \"tool_free\": {\n+          \"type\": \"boolean\"\n+        },\n         \"tool_search\": {\n           \"type\": \"boolean\"\n         },"
+    },
+    {
+      "filename": "codex-rs/core/src/session/mcp.rs",
+      "status": "modified",
+      "additions": 5,
+      "deletions": 1,
+      "patch": "@@ -334,7 +334,11 @@ impl Session {\n         } = mcp_projection;\n         let mcp_config = Arc::new(mcp_config);\n         let tool_plugin_provenance = codex_mcp::tool_plugin_provenance(&mcp_config);\n-        let mcp_servers = effective_mcp_servers(&mcp_config, auth.as_ref());\n+        let mcp_servers = if self.enabled(Feature::ToolFree) {\n+            HashMap::new()\n+        } else {\n+            effective_mcp_servers(&mcp_config, auth.as_ref())\n+        };\n         let environment_manager = self.services.turn_environments.environment_manager();\n         // TODO(anp): Migrate MCP runtime cwd plumbing to PathUri so foreign environment cwd\n         // values can be used without falling back to the legacy host cwd."
+    },
+    {
+      "filename": "codex-rs/core/src/session/session.rs",
+      "status": "modified",
+      "additions": 5,
+      "deletions": 1,
+      "patch": "@@ -694,7 +694,11 @@ impl Session {\n                 )\n                 .await;\n             let mcp_config = &mcp_projection.config;\n-            let mcp_servers = codex_mcp::effective_mcp_servers(mcp_config, auth.as_ref());\n+            let mcp_servers = if config_for_mcp.features.enabled(Feature::ToolFree) {\n+                HashMap::new()\n+            } else {\n+                codex_mcp::effective_mcp_servers(mcp_config, auth.as_ref())\n+            };\n             let tool_plugin_provenance = codex_mcp::tool_plugin_provenance(mcp_config);\n             let auth_statuses = compute_auth_statuses(\n                 mcp_servers.iter(),"
+    },
+    {
+      "filename": "codex-rs/core/src/session/turn.rs",
+      "status": "modified",
+      "additions": 16,
+      "deletions": 0,
+      "patch": "@@ -515,6 +515,9 @@ async fn build_skills_and_plugins(\n     cancellation_token: &CancellationToken,\n ) -> Option<(Vec<ResponseItem>, HashSet<String>)> {\n     let turn_context = step_context.turn.as_ref();\n+    if turn_context.config.features.enabled(Feature::ToolFree) {\n+        return Some((Vec::new(), HashSet::new()));\n+    }\n     // Guardian input embeds the parent transcript as untrusted evidence. Do not interpret skill or\n     // plugin mentions from that generated prompt as requests to inject additional instructions.\n     if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {\n@@ -1220,6 +1223,19 @@ pub(crate) async fn built_tools(\n     cancellation_token: &CancellationToken,\n ) -> CodexResult<Arc<ToolRouter>> {\n     let turn_context = step_context.turn.as_ref();\n+    if turn_context.config.features.enabled(Feature::ToolFree) {\n+        return Ok(Arc::new(ToolRouter::from_context(\n+            step_context,\n+            ToolRouterParams {\n+                mcp_tools: None,\n+                deferred_mcp_tools: None,\n+                tool_suggest_candidates: None,\n+                extension_tool_executors: Vec::new(),\n+                dynamic_tools: &[],\n+            },\n+            &sess.services.tool_search_handler_cache,\n+        )));\n+    }\n     let mcp_connection_manager = step_context.mcp.manager();\n     let has_mcp_servers = mcp_connection_manager.has_servers();\n     let all_mcp_tools = step_context"
+    },
+    {
+      "filename": "codex-rs/core/src/tools/spec_plan.rs",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 0,
+      "patch": "@@ -173,6 +173,9 @@ fn build_tool_specs_and_registry(\n     tool_search_handler_cache: &ToolSearchHandlerCache,\n ) -> (Vec<ToolSpec>, ToolRegistry) {\n     let turn_context = step_context.turn.as_ref();\n+    if turn_context.config.features.enabled(Feature::ToolFree) {\n+        return build_model_visible_specs_and_registry(turn_context, PlannedTools::default());\n+    }\n     let ToolRouterParams {\n         mcp_tools,\n         deferred_mcp_tools,"
+    },
+    {
+      "filename": "codex-rs/features/src/lib.rs",
+      "status": "modified",
+      "additions": 8,
+      "deletions": 0,
+      "patch": "@@ -164,6 +164,8 @@ pub enum Feature {\n     ToolSearchAlwaysDeferMcpTools,\n     /// Expose MCP model-visible namespaces without the legacy `mcp__` prefix.\n     NonPrefixedMcpToolNames,\n+    /// Disable tool registration and MCP server startup.\n+    ToolFree,\n     /// Enable discoverable tool suggestions for apps.\n     ToolSuggest,\n     /// Enable plugins.\n@@ -1088,6 +1090,12 @@ pub const FEATURES: &[FeatureSpec] = &[\n         stage: Stage::UnderDevelopment,\n         default_enabled: false,\n     },\n+    FeatureSpec {\n+        id: Feature::ToolFree,\n+        key: \"tool_free\",\n+        stage: Stage::UnderDevelopment,\n+        default_enabled: false,\n+    },\n     FeatureSpec {\n         id: Feature::UnavailableDummyTools,\n         key: \"unavailable_dummy_tools\","
+    }
+  ]
+}
