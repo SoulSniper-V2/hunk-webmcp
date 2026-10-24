@@ -18,7 +18,7 @@ export interface ModelContext {
   registerTool: (
     tool: WebMcpTool,
     options?: { signal?: AbortSignal },
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 declare global {

@@ -18,5 +18,5 @@
     "noUncheckedSideEffectImports": true,
     "types": ["node"]
   },
-  "include": ["vite.config.ts", "api/github.mjs.d.ts"]
+  "include": ["vite.config.ts", "api/github.d.mts"]
 }
