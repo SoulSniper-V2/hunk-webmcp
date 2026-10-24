@@ -40,11 +40,13 @@ export function parsePatch(patch: string | undefined): Hunk[] {
     } else if (raw.startsWith("-")) {
       line = { kind: "del", text: raw.slice(1), oldNo, newNo: null };
       oldNo += 1;
-    } else {
-      const text = raw.startsWith(" ") ? raw.slice(1) : raw;
+    } else if (raw.startsWith(" ")) {
+      const text = raw.slice(1);
       line = { kind: "ctx", text, oldNo, newNo };
       oldNo += 1;
       newNo += 1;
+    } else {
+      continue;
     }
     current.lines.push(line);
   }

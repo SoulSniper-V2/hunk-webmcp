@@ -22,7 +22,7 @@ import {
 } from "./store";
 import { DEFAULT_PR, VERDICTS } from "./types";
 import type { CommentSide, DraftComment, Hunk, HunkLine, Verdict } from "./types";
-import { getModelContext, registerTools, TOOL_NAMES } from "./webmcp";
+import { registerTools } from "./webmcp";
 
 const VERDICT_LABEL: Record<Verdict, string> = {
   comment: "Comment",
@@ -34,7 +34,7 @@ export function App() {
   const state = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
   const [banner, setBanner] = useState(true);
   const [tools, setTools] = useState<string[]>([]);
-  const [connected, setConnected] = useState(false);
+  const connected = tools.length > 0;
   const [url, setUrl] = useState<string>(DEFAULT_PR.url);
   const [composer, setComposer] = useState<{
     path: string;
@@ -59,9 +59,13 @@ export function App() {
 
   useEffect(() => {
     const ac = new AbortController();
-    const names = registerTools(ac.signal);
-    setTools(names);
-    setConnected(names.length > 0 || !!getModelContext());
+    void registerTools(ac.signal).then((names) => {
+      if (!ac.signal.aborted) setTools(names);
+    }).catch(() => {
+      if (ac.signal.aborted) return;
+      ac.abort();
+      setTools([]);
+    });
     return () => ac.abort();
   }, []);
 
@@ -73,7 +77,7 @@ export function App() {
 
   useEffect(() => {
     if (!state.focusHunk) return;
-    const el = document.querySelector(`[data-hunk="${state.focusHunk.path}:${state.focusHunk.startLine}"]`);
+    const el = document.querySelector(`[data-hunk="${CSS.escape(`${state.focusHunk.path}:${state.focusHunk.startLine}`)}"]`);
     el?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [state.focusHunk]);
 
@@ -140,7 +144,6 @@ export function App() {
     setCopied(false);
     try {
       await submitReview();
-      setCopied(true);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     }
@@ -162,8 +165,8 @@ export function App() {
       {banner && !connected && (
         <div className="banner">
           <span>
-            Agent offline. Open this page in ChatGPT desktop’s in-app browser (Sol/Terra, not Luna) or Chrome 149+
-            with <code>chrome://flags/#enable-webmcp-testing</code>, then fully restart the browser.
+            Agent offline. Use a WebMCP-enabled browser with <code>chrome://flags/#enable-webmcp-testing</code>
+            {" "}enabled, then restart it. You can still review and draft comments here.
           </span>
           <button type="button" className="dismiss" onClick={() => setBanner(false)} aria-label="Dismiss">
             ×
@@ -214,14 +217,14 @@ export function App() {
             placeholder="github.com/owner/repo/pull/123"
             aria-label="Pull request URL"
           />
-          <button type="submit" disabled={state.loading}>
+          <button type="submit" disabled={state.loading || state.submitting}>
             {state.loading ? "Loading" : "Load"}
           </button>
         </form>
 
         <div className={`agent ${connected ? "on" : "off"}`}>
           <span className="dot" />
-          {connected ? `Agent connected · ${tools.length || TOOL_NAMES.length} tools` : "Agent offline"}
+          {connected ? `Agent connected · ${tools.length} tools` : "Agent offline"}
         </div>
       </header>
 
@@ -290,7 +293,7 @@ export function App() {
                         draftBody={draftBody}
                         setDraftBody={setDraftBody}
                         setComposer={setComposer}
-                        sealed={Boolean(state.sealed)}
+                        sealed={Boolean(state.sealed) || state.submitting || state.loading}
                         focused={
                           state.focusHunk?.path === selected.filename &&
                           state.focusHunk.startLine === h.startLine
@@ -335,7 +338,7 @@ export function App() {
               )}
             </div>
 
-            <fieldset className="verdicts" disabled={Boolean(state.sealed)}>
+            <fieldset className="verdicts" disabled={Boolean(state.sealed) || state.submitting || state.loading}>
               <legend>Verdict</legend>
               {VERDICTS.map((v) => (
                 <label key={v}>
@@ -357,10 +360,11 @@ export function App() {
               title={disabled ?? "Seal this review. Only you can submit."}
               onClick={() => void onSubmit()}
             >
-              Submit review
+              {state.submitting ? "Submitting…" : "Submit review"}
             </button>
             {disabled && !state.sealed ? <p className="why">{disabled}</p> : null}
             {submitError ? <p className="why err">{submitError}</p> : null}
+            {state.error ? <p className="why err" role="alert">{state.error}</p> : null}
             <p className="quiet lock">
               Submit is human-only. It is not a WebMCP tool. The agent can draft; it cannot post.
             </p>
@@ -583,7 +587,7 @@ function LineRow({
           </td>
         </tr>
       ))}
-      {open ? (
+      {open && !sealed ? (
         <tr className="composer">
           <td colSpan={4}>
             <form

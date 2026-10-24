@@ -1,8 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
-// JS helper shared with Vercel /api — types live in api/github.mjs.d.ts
-// @ts-expect-error module is plain JS
+// Shared with the Vercel endpoints; declarations live in api/github.d.mts.
 import { fetchPullRequest, parsePrRef, postPullRequestReview } from "./api/github.mjs";
 
 const headers = {
@@ -108,6 +107,7 @@ function apiPlugin(): Plugin {
 
 export default defineConfig({
   plugins: [react(), apiPlugin()],
-  server: { headers, host: true, port: 5173 },
-  preview: { headers, host: true, port: 4173 },
+  build: { target: ["chrome107", "edge107", "firefox104", "safari16"] },
+  server: { headers },
+  preview: { headers },
 });

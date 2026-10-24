@@ -8,12 +8,13 @@ import type {
   Receipt,
   Verdict,
 } from "./types";
-import { parsePatch } from "./diff";
+import { commentable, parsePatch } from "./diff";
 
 export interface AppState {
   pr: PullRequest | null;
   source: PrSource | null;
   loading: boolean;
+  submitting: boolean;
   error: string | null;
   selectedPath: string | null;
   focusHunk: { path: string; startLine: number } | null;
@@ -26,11 +27,13 @@ export interface AppState {
 type Listener = () => void;
 
 const listeners = new Set<Listener>();
+let importVersion = 0;
 
 let state: AppState = {
   pr: null,
   source: null,
   loading: false,
+  submitting: false,
   error: null,
   selectedPath: null,
   focusHunk: null,
@@ -72,6 +75,8 @@ function requirePr(): PullRequest {
 }
 
 function assertDraft(action: string) {
+  if (state.submitting) throw new Error(`Review is being submitted. ${action} is refused.`);
+  if (state.loading) throw new Error(`Pull request is loading. ${action} is refused.`);
   if (state.sealed) {
     throw new Error(`Review is sealed. ${action} is refused.`);
   }
@@ -144,7 +149,9 @@ function coercePr(raw: unknown): PullRequest {
 }
 
 export function loadPrPayload(raw: unknown, source: PrSource = "snapshot"): PullRequest {
+  if (state.submitting) throw new Error("Wait for review submission before loading another pull request.");
   const pr = coercePr(raw);
+  importVersion += 1;
   set({
     pr,
     source,
@@ -160,13 +167,13 @@ export function loadPrPayload(raw: unknown, source: PrSource = "snapshot"): Pull
   return pr;
 }
 
-async function fetchSnapshot(): Promise<PullRequest> {
+async function fetchSnapshot(): Promise<unknown> {
   if (typeof fetch !== "function") {
     throw new Error("No snapshot available in this environment");
   }
   const res = await fetch("/demo-pr.json");
   if (!res.ok) throw new Error("Snapshot fallback failed");
-  return loadPrPayload(await res.json(), "snapshot");
+  return res.json();
 }
 
 export async function importPr(input: {
@@ -175,7 +182,19 @@ export async function importPr(input: {
   repo?: string;
   number?: number | string;
 }): Promise<PullRequest> {
-  const ref = parsePrInput(input);
+  if (state.submitting) throw new Error("Wait for review submission before loading another pull request.");
+  let ref: ReturnType<typeof parsePrInput>;
+  try {
+    ref = parsePrInput(input);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    set({ error: message });
+    throw err instanceof Error ? err : new Error(message);
+  }
+  const version = ++importVersion;
+  const ensureCurrent = () => {
+    if (version !== importVersion) throw new Error("Pull request import was superseded by a newer load.");
+  };
   set({ loading: true, error: null });
   const qs = new URLSearchParams({
     owner: ref.owner,
@@ -183,27 +202,27 @@ export async function importPr(input: {
     number: String(ref.number),
   });
   try {
-    const res = await fetch(`/api/pr?${qs.toString()}`);
-    if (!res.ok) {
-      const body = (await res.json().catch(() => ({}))) as { error?: string; code?: string };
-      const rateLimited = res.status === 403 || body.code === "rate_limited";
-      if (rateLimited && isDefaultRef(ref.owner, ref.repo, ref.number)) {
-        return await fetchSnapshot();
+    let data: unknown;
+    let source: PrSource = "live";
+    try {
+      const res = await fetch(`/api/pr?${qs.toString()}`);
+      ensureCurrent();
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || `Failed to load ${ref.owner}/${ref.repo}#${ref.number}`);
       }
-      throw new Error(body.error || `Failed to load ${ref.owner}/${ref.repo}#${ref.number}`);
+      data = coercePr(await res.json());
+    } catch (err) {
+      ensureCurrent();
+      if (!isDefaultRef(ref.owner, ref.repo, ref.number)) throw err;
+      data = await fetchSnapshot();
+      source = "snapshot";
     }
-    const data = await res.json();
-    return loadPrPayload(data, "live");
+    ensureCurrent();
+    return loadPrPayload(data, source);
   } catch (err) {
-    if (isDefaultRef(ref.owner, ref.repo, ref.number)) {
-      try {
-        return await fetchSnapshot();
-      } catch {
-        /* fall through */
-      }
-    }
     const message = err instanceof Error ? err.message : String(err);
-    set({ loading: false, error: message });
+    if (version === importVersion) set({ loading: false, error: message });
     throw err instanceof Error ? err : new Error(message);
   }
 }
@@ -296,8 +315,14 @@ export function addComment(input: {
   const body = input.body.trim();
   if (!body) throw new Error("Comment body is required");
   const line = Number(input.line);
-  if (!Number.isFinite(line) || line <= 0) throw new Error("line must be a positive number");
-  const side: CommentSide = input.side === "LEFT" ? "LEFT" : "RIGHT";
+  if (!Number.isSafeInteger(line) || line <= 0) throw new Error("line must be a positive integer");
+  const side = input.side ?? "RIGHT";
+  if (side !== "LEFT" && side !== "RIGHT") throw new Error("side must be LEFT or RIGHT");
+  const exists = parsePatch(file.patch).some((hunk) => hunk.lines.some((row) => {
+    const target = commentable(row);
+    return target?.line === line && target.side === side;
+  }));
+  if (!exists) throw new Error(`No commentable ${side} line ${line} in ${path}`);
   const comment: DraftComment = {
     id: nid(),
     path,
@@ -323,6 +348,7 @@ export function listComments() {
 
 export function setVerdict(verdict: Verdict): { verdict: Verdict; sealed: false } {
   assertDraft("set_verdict");
+  requirePr();
   if (verdict !== "comment" && verdict !== "request_changes" && verdict !== "approve") {
     throw new Error("verdict must be comment, request_changes, or approve");
   }
@@ -335,6 +361,8 @@ export function setFileQuery(query: string) {
 }
 
 export function submitDisabledReason(): string | null {
+  if (state.submitting) return "Review is being submitted";
+  if (state.loading) return "Wait for the pull request to finish loading";
   if (state.sealed) return "Review already sealed";
   if (!state.pr) return "Load a pull request first";
   if (state.comments.length === 0 && state.verdict === "comment") {
@@ -382,7 +410,10 @@ export async function submitReview(): Promise<Receipt> {
   const reason = submitDisabledReason();
   if (reason) throw new Error(reason);
   const comments = state.comments.map((c) => ({ ...c }));
-  const body = formatReviewBody(pr, state.verdict, comments);
+  const verdict = state.verdict;
+  const body = formatReviewBody(pr, verdict, comments);
+  // Lock the shared human/agent draft before the first asynchronous operation.
+  set({ submitting: true });
 
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {
@@ -403,7 +434,7 @@ export async function submitReview(): Promise<Receipt> {
         owner: pr.owner,
         repo: pr.repo,
         number: pr.number,
-        event: githubEvent(state.verdict),
+        event: githubEvent(verdict),
         body,
         comments: comments.map((c) => ({
           path: c.path,
@@ -418,7 +449,7 @@ export async function submitReview(): Promise<Receipt> {
       message?: string;
       reason?: string;
     };
-    if (data.posted === true) {
+    if (res.ok && data.posted === true) {
       githubPosted = true;
       githubMessage = "Posted to GitHub.";
     } else {
@@ -432,13 +463,13 @@ export async function submitReview(): Promise<Receipt> {
 
   const receipt: Receipt = {
     timestamp: new Date().toISOString(),
-    verdict: state.verdict,
+    verdict,
     comments,
     prUrl: pr.html_url,
     githubPosted,
     githubMessage,
     body,
   };
-  set({ sealed: receipt });
+  set({ sealed: receipt, submitting: false });
   return receipt;
 }

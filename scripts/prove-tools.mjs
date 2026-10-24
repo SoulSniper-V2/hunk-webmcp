@@ -6,7 +6,7 @@
  * No submit_review / merge / approve_on_github tool.
  */
 import * as esbuild from "esbuild";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -23,9 +23,10 @@ const modelContext = {
 
 globalThis.window = globalThis;
 globalThis.document = { modelContext };
-globalThis.navigator = {};
+Object.defineProperty(globalThis, "navigator", { value: {}, configurable: true });
 
 const outdir = mkdtempSync(join(tmpdir(), "hunk-prove-"));
+process.on("exit", () => rmSync(outdir, { recursive: true, force: true }));
 const outfile = join(outdir, "webmcp-bundle.mjs");
 
 await esbuild.build({
@@ -61,7 +62,7 @@ const EXPECTED = [
 const FORBIDDEN = ["submit_review", "merge", "approve_on_github", "submit", "post_review"];
 
 const ac = new AbortController();
-const names = registerTools(ac.signal);
+const names = await registerTools(ac.signal);
 
 check("getModelContext() sees mock", getModelContext() === modelContext);
 check("registerTools returns 8 names", Array.isArray(names) && names.length === 8, JSON.stringify(names));

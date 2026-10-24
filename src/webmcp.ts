@@ -156,7 +156,7 @@ const tools: WebMcpTool[] = [
         path: str(args, "path", true),
         line: num(args, "line", true)!,
         body: str(args, "body", true),
-        side: optStr(args, "side") === "LEFT" ? "LEFT" : "RIGHT",
+        side: optStr(args, "side") as "LEFT" | "RIGHT" | undefined,
         actor: "agent",
       }),
     ),
@@ -188,17 +188,23 @@ const tools: WebMcpTool[] = [
 ];
 
 export function getModelContext(): ModelContext | null {
-  const ctx = document.modelContext ?? navigator.modelContext;
-  if (typeof ctx?.registerTool === "function") return ctx;
+  const contexts = [
+    typeof document !== "undefined" ? document.modelContext : undefined,
+    typeof navigator !== "undefined" ? navigator.modelContext : undefined,
+  ];
+  for (const ctx of contexts) {
+    if (typeof ctx?.registerTool === "function") return ctx;
+  }
   return null;
 }
 
-export function registerTools(signal: AbortSignal): string[] {
+export async function registerTools(signal: AbortSignal): Promise<string[]> {
   const ctx = getModelContext();
-  if (!ctx) return [];
+  if (!ctx || signal.aborted) return [];
   const names: string[] = [];
   for (const tool of tools) {
-    ctx.registerTool(tool, { signal });
+    await ctx.registerTool(tool, { signal });
+    if (signal.aborted) return [];
     names.push(tool.name);
   }
   return names;
